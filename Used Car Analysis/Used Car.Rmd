@@ -1,0 +1,187 @@
+---
+title: "Used Car Analysis"
+author: "Zhijing Zhao"
+date: "12/14/2019"
+output:
+  prettydoc::html_pretty:
+    theme: architect 
+    highlight: github
+---
+
+```{r setup, include=FALSE,message=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+```
+
+# Data Preparation
+
+```{r,import,message=FALSE,warning=FALSE}
+cra_origin <- read_csv('C:\\Users\\zhiji\\Desktop\\craigslistVehicles.csv')
+
+cra <- cra_origin %>% 
+  select(-url,-city_url,-VIN,-size,-image_url,-make) %>%
+  separate(city,c('city','state'),',') %>% 
+  mutate(year = 2020-year) %>% 
+  filter(price!=0)
+
+cols = c('city','state','manufacturer','condition','cylinders','fuel','title_status','transmission','drive','type','paint_color')
+cra[cols] <- lapply(cra[cols], as.factor) 
+
+# matched mean imputation
+cra <- cra %>% 
+  group_by(year) %>% 
+  mutate(odometer=ifelse(!is.na(odometer),odometer,mean(odometer, na.rm=TRUE))) %>% 
+  ungroup() %>% 
+  select(-city)
+cra <- na.omit(cra)
+cra$condition <- factor(cra$condition, levels = c("salvage", "fair", "good", "excellent", "like new", "new"))
+```
+
+# state analysis
+
+### US map
+```{r,message = FALSE}
+library('leaflet')
+map_cra <- leaflet() %>% 
+  setView(lng = -97.9, lat = 39.38, zoom = 4)
+
+map_cra %>% 
+  addTiles() %>% 
+  addMarkers(data = cra, clusterOptions = markerClusterOptions())
+```
+
+Seen from the above map, the overall number of used cars published on craigslist website on the east coast is way higher than that in other states in US. And big cities tend to have less used car to be sold than middle-sized cities. In addition, rich neighbourhoods in one city tend to have the least number of used cars to be sold in the city.
+
+### anova test
+
+After exploring the number of used cars published on craiglist, I would like to see if the cars' location will make a difference on the listed price. To see the difference among states, I used ANOVA test.
+
+```{r}
+summary(aov(price  ~ state, data = cra))
+```
+
+The above statistics summary shows that difference in car price among states is not significant.
+
+```{r}
+tukey <- TukeyHSD(aov(price  ~ state, data = cra))
+# Tukey multiple comparisons of means (95% family-wise confidence level)
+library(DT)
+
+datatable(tukey$state, options = list(pageLength = 5))%>%
+    formatRound(columns=c('diff', 'lwr','upr','p adj'), digits=2)
+```
+
+### regression model
+
+##### variables selection
+
+**numeric variable - correlation**
+
+```{r}
+cor(cra[, c('year','odometer')])
+```
+The year variable and odometer is not correlated and can be used together without the multicollinearity issue.
+
+**categorical - association**
+
+```{r}
+library(ggmosaic)
+#visualize the data first
+cra %>% 
+  select(transmission, drive) %>% 
+  table() %>%
+  as.data.frame() %>% 
+  ggplot() +
+  geom_mosaic(aes(weight = Freq, x = product(transmission), fill = drive)) + 
+  scale_fill_brewer(type = "qual")+
+  xlab('transmission')+ylab('drive')
+```
+
+```{r,message=FALSE,warning=FALSE}
+library(vcd)
+chisq.test(cra$transmission, cra$drive,correct = FALSE)
+```
+
+The p-value here is small and the x-squared is very big. So the result shows the rows and columns do not fit the expected distribution or they are significantly associated. And the number expected versus the number observed are significantly different.
+
+```{r}
+cra %>% 
+  select(drive, fuel) %>% 
+  assoc(., shade = TRUE)
+```
+
+It shows the observed of diesel and other for 4wd exceeds the exact number. And the observed of gas and hybrid for 4wd is below the exact number.
+
+```{r}
+chisq.test(cra$type, cra$fuel,correct = FALSE)
+```
+The p-value here is small and the x-squared is very big. So the result shows they are significantly associated. And the number expected versus the number observed are significantly different.
+
+```{r}
+chisq.test(cra$drive, cra$type,correct = FALSE)
+```
+
+They are also significantly associated. And the number expected versus the number observed are significantly different.
+
+After testing the association between pairs of categorical variables in my data, I find those pairs all have significant associations. In terms of which ones to choose in my model, I asked the greedy learner for help. *Decision tree* model has the capabilities of finding out the most important features to predict the response variable. 
+
+**Decision tree**
+
+```{r}
+cra_tree <- cra%>% 
+  select(-lat,-long,-desc)# exclude unmeaningful variable
+set.seed(1234)
+sample_set <- sample(nrow(cra_tree), round(nrow(cra_tree)*.75), replace = FALSE)
+cra_train <- cra_tree[sample_set, ]
+cra_test <- cra_tree[-sample_set, ]
+
+library(rpart)
+tree_mod <-rpart(price ~ . ,method = "anova",data = cra_train)
+
+library(rpart.plot)
+rpart.plot(tree_mod)
+```
+
+The decision tree tells me that **year, drive and manufacturer** are significant features to consider in order to better predict used car price.
+
+##### mixed model with random slopes and random intercepts
+
+I built a model which allows the intercept to vary between different groups of drive or manufacturer, but it will also allow the slope to vary between groups.
+
+```{r,message=FALSE,warning=FALSE}
+library(lme4)
+hierMod <- lmer(price ~ (year|manufacturer)+
+                  (year|drive),data=cra)
+summary(hierMod)
+```
+
+The random *intercept* standard deviation for manufacturer is telling us the amount that the price bounce around from manufacturer to manufacturer and the *year variance* is telling us how much variability there is within the slope between manufacturers.
+
+Also, the price change among different drives is 10127048, and a variability of 1.186e+14 is within the slope beteen manufacturers.
+
+*ICC*
+```{r}
+1.291e+11/(1.291e+11+1.048e+14)
+1.026e+14/(1.026e+14+1.048e+14)
+```
+
+The intraclass correlation shows that 0.1% of variance in price is accounted for by the manufacturer alone. And 49.5% of variance in price is accounted for by the drive alone.
+
+```{r}
+cra_train %>% 
+    ggplot(., aes(price, year, group = drive, color = drive)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme_minimal()
+```
+
+When looking at this visualization, it becomes very clear that there is significant difference in the *slopes* of year between drives here.
+
+```{r}
+cra_train %>% 
+    ggplot(., aes(price, year, group = manufacturer, color = manufacturer)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme_minimal()
+```
+
+When looking at this visualization, it becomes very clear that there is significant difference in the *slopes* of year between manufacturers here.
