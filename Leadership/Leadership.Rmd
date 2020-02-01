@@ -1,0 +1,258 @@
+---
+title: "Homework 2"
+author: "Zhijing Zhao"
+date: "11/13/2019"
+output:
+  html_document:
+    theme: spacelab
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(interactions)
+```
+
+## The Data
+
+The data that we are using is available in the "data" folder and is called: teamPerc.RData.
+```{r}
+load("C:\\Users\\zhiji\\Downloads\\teamPerc.RData")
+```
+
+## What Makes An Effective Leader?
+
+Why are some people seen as effective leaders and others are not? Are there any behaviors or characteristics that can help us quantify what an effective leader looks like? 
+
+The data that we are using comes from a large survey of employees and their direct manager (i.e., each leader provided self-ratings and their direct subordinates provided rating about the leader -- this is reflected by the `Rater` variable). We are most interested in subordinate ratings. This data contains individual items and the scale score for those items. The scale are hierarchical and are constructed as follows:
+
+The *forceful* scale contains the following subscales: takesCharge, declares, pushes
+
+The *enabling* scale contains the following subscales: empowers, listens, supports
+
+The *strategic* scale contains the following subscales: direction, growth, innovation
+
+The *operational* scale contains the following subscales: execution, efficiency, order
+
+There are also a number of demographic variables within this data (e.g., age, experience, gender, tenure). 
+
+The main goal is explain the *effect* variable. You can use individual items, scale subscores, and/or scale scores. 
+
+### Bronze
+
+#### Hypotheses
+
+Hypothesis 1:
+
+Enabling behaviors have a positive impact on making better leadership.
+
+Hypothesis 2:
+
+Gender has an effect on Whether forceful behaviors contributes to making effective leadership.
+
+Hypothesis 3:
+
+Direction contributes to effects better than innovation does.
+
+#### Power Analysis
+
+$$f^2 = \frac{R^2_{adjusted}}{1 - R^2_{adjusted}}$$
+```{r}
+library(pwr)
+# firstly, get the ideal effect size by using the coarse approach
+pwr::cohen.ES("f2", "medium")
+
+# using the above formula 
+# I estimate the adjusted R square to be 0.1
+print(0.1^2/(1-0.1^2))
+
+# set the effect size to be 0.01
+# In hypothsis 1, u=1.
+pwr.f2.test(u = 1, v = NULL, f2 = .01, power = .8)
+# In hypothsis 2, u=3.
+pwr.f2.test(u = 3, v = NULL, f2 = .01, power = .8)
+# In hypothsis 3, u=2.
+pwr.f2.test(u = 2, v = NULL, f2 = .01, power = .8)
+```
+
+From the output, we know that n-k equals to 784.8/1090.2/963.5. 
+
+So, after conducting an *a prior* power analysis, the sample size for hypothesis 1 is 784.8+1+1=786.8.
+The sample size for hypothesis 2 is 1090.2+3+1=1094.2.
+The sample size for hypothesis 3 is 963.5+2+1=966.5.
+
+After conducting your power analysis, use linear regression to test your hypotheses and produce appropriate visualizations.
+
+#### Hypothesis 1:
+
+
+```{r}
+# filter to only include the rating data provided by subordinate
+teamPerc_sub <- teamPerc %>% 
+  filter(Rater == 3)
+
+# hypothesis 1
+hy1 <- lm(effect ~ enabling, data = teamPerc_sub)
+summary(hy1)
+```
+
+From the above result, we can see that the enabling has a positive (coefficient is above 1) and significant (p value is below significance threshold) influence on effect. So we can reject the null hypothesis which is enabling do not have an impact on effect.
+
+```{r}
+#visualization
+teamPerc_sub %>% 
+  ggplot(mapping = aes(x=enabling,y=effect)) + 
+  geom_point(alpha=0.45)+
+  geom_smooth(method=lm)+
+  theme_bw()+
+  ggtitle("How can Enabling Affect Leadership Effect?")+
+  theme(plot.title = element_text(color="red", size=10, face="bold.italic"))
+```
+
+From the visualization, we can see an upward slope which shows the positive relationship between enabling and effect.
+
+#### Hypothesis 2:
+
+
+```{r}
+teamPerc_sub <- teamPerc_sub %>% 
+  filter(Gender != "NaN") %>% 
+  mutate(Gender = as.factor(Gender))
+hy2 <- lm(effect ~ forceful * Gender, data = teamPerc_sub)
+summary(hy2)
+```
+
+From the above result, both the forceful and gender have an individual significant impact on effect. The forceful has a slightly negative impact. And gender 1 tends to have higher effect than gender 0. Their interaction also has a significant impact on effect. So we can conclude that Whether forceful behaviors contributes to making better leadership depends on the leader's gender.
+
+Then, let us visualize the difference between gender.
+
+```{r}
+#visualization
+library(interactions)
+
+interact_plot(hy2, pred = forceful, modx = Gender)
+```
+
+We can see that for gender 1 (male), as the forceful characteristic increases, the leadership effects decrease at a steeper slope than gender 0 (female).
+
+#### Hypothesis 3:
+
+
+```{r}
+hy3 <- lm(effect ~ direction + innovation, data = teamPerc_sub)
+summary(hy3)
+```
+
+From the statistic results, the direction and innovation have similar degree of impact on effect because their estimate coefficients are close. And their p value is small emough to show their significant impact on effect. So direction and innovation can contribute to the leadership effectiveness in a significant way.
+```{r}
+teamPerc_sub %>% 
+  ggplot() + 
+  geom_smooth(mapping = aes(x=direction,y=effect,
+                            color="blue"),method=lm)+
+  geom_smooth(mapping = aes(x=innovation,y=effect,
+                            color="red"),method=lm)+
+  theme_bw()+
+  scale_color_discrete(name = "characteristic", labels = c("innovation", "direction"))+
+  xlab("")+
+  ggtitle("What increases leadership effects?")+
+  theme(plot.title = element_text(color="black", size=10, face="bold.italic"))
+```
+
+### Silver
+
+Conduct any form of resampling and discuss the output from your resampled results. How does the resultant distribution help to support your hypotheses?
+
+```{r}
+# for hypothesis 3, i would like to use bootstrapping
+modelVars <- dplyr::select(teamPerc_sub, effect, direction, innovation)
+
+bootstrapping <- function(df) {
+  df <- df
+  
+  sampledRows <- sample(1:nrow(df), nrow(df), replace = TRUE)
+  
+  df <- df[sampledRows, ]
+  
+  bsMod <- lm(effect ~  direction + innovation, data = df)
+  
+  results <- broom::tidy(bsMod)
+  
+  return(results)
+}
+
+bootstrapping(modelVars)
+```
+
+
+```{r}
+bsRep <- replicate(1000, bootstrapping(modelVars), simplify = FALSE)
+
+bsCombined <- do.call("rbind", bsRep)
+
+meanEffect <- mean(bsCombined$statistic[bsCombined$term == "direction"])
+
+ciUpper <- quantile(bsCombined$statistic[bsCombined$term == "direction"], .975)
+
+ciLower <- quantile(bsCombined$statistic[bsCombined$term == "direction"], .025)
+
+hist(bsCombined$statistic[bsCombined$term == "direction"], col = "slategray1")
+
+abline(v = summary(hy3)$coefficients["direction","t value"], col = "goldenrod4", lwd = 2)
+
+abline(v = ciUpper, col = "sienna3", lwd = 2)
+
+abline(v = ciLower, col = "sienna3", lwd = 2)
+
+abline(v = meanEffect, col = "sienna3", lwd = 2)
+```
+
+Across all of our resampled values, 95% of the t values will contain the true population value between 25.8 and 32.5. It shows that t values are mostly significant to show that direction has a significant impact on leadership effect.
+
+```{r}
+meanEffect <- mean(bsCombined$statistic[bsCombined$term == "innovation"])
+
+ciUpper <- quantile(bsCombined$statistic[bsCombined$term == "innovation"], .975)
+
+ciLower <- quantile(bsCombined$statistic[bsCombined$term == "innovation"], .025)
+
+hist(bsCombined$statistic[bsCombined$term == "innovation"], col = "slategray1")
+
+abline(v = summary(hy3)$coefficients["innovation","t value"], col = "goldenrod4", lwd = 2)
+
+abline(v = ciUpper, col = "sienna3", lwd = 2)
+
+abline(v = ciLower, col = "sienna3", lwd = 2)
+
+abline(v = meanEffect, col = "sienna3", lwd = 2)
+```
+95% of the t values will contain the true population value between 15.8 and 22.1. So the innovation is mostly significant to the effect variable.
+
+### Gold
+
+Consider any potential problems of your original regression model(s). Were there any observations exhibiting leverage? How sure are you about the standard errors? Identify one specific issue and revise your model strategy to help allieviate that issue.
+
+Test model 3
+```{r}
+# to see heteroscedasticity
+plot(hy3$fitted.values, hy3$residuals)
+```
+
+The above plot shows a clear pattern in standard errors and the model has the problem of heteroscedasticity.
+
+Then use robust regrssion to solve the problem of outliers and standard errors.
+```{r}
+library(MASS)
+robTest = rlm(effect ~ direction+innovation,data = teamPerc_sub, psi = psi.bisquare)
+
+summary(robTest)
+```
+```{r}
+library(sandwich)
+
+vcovHC(hy3)
+
+lmtest::coeftest(hy3, vcov = vcovHC)
+```
+
+After using a heteroscedasticity-consistent covariance matrix to test our coefficients, we get larger standard errors which actually show us a better and more real picture that the estimates range significantly. 
