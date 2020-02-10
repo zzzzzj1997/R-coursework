@@ -1,0 +1,541 @@
+---
+title: "Homework 1 - Sentiment Analysis"
+author: "Zhijing Zhao"
+output:
+  rmdformats::readthedown
+---
+
+```{r setup,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(wordcloud2)
+library(DT)
+unzip('E://wweCalls.zip')
+```
+
+# Bronze
+
+## Step 1
+
+Read all of the parsed transcripts into R. You can do them individually, but that is a horrible idea and I don't recommend it. Instead, use the `list.files()` function and read files from the resultant object.
+
+Perform some initial exploration of the text and perform any initial cleaning. This is entirely up to you to do whatever you consider necessary.
+
+```{r,warning=FALSE}
+# import the csv files with a pattern that starts with wwe_parsed
+temp <- list.files(pattern = "wwe_parsed.+csv$", recursive = TRUE)
+parsed <- lapply(temp, read.csv)%>% bind_rows()
+
+parsed$title <- gsub(".*SVP.*", "SVP", parsed$title)
+parsed$title <- gsub(".*V.*P.*", "VP", parsed$title)
+parsed$title <- gsub(".*C.*E.*O.*", "CEO", parsed$title)
+parsed$title <- gsub(".*C.*F.*O.*", "CFO", parsed$title)
+parsed$title <- gsub("Director.*", "Director", parsed$title)
+parsed$title <- gsub(".*Analyst.*", "Analyst", parsed$title)
+parsed$organization <- gsub("World Wrestling Entertainment.*", "World Wrestling Entertainment", parsed$organization)
+
+parsed<- parsed %>% 
+  select(-firstName,-firstLast) %>% 
+  drop_na() %>% 
+  mutate_at(c('name','organization','title','gender','likelyRace','quarter'),factor) %>% 
+  mutate(date = as.Date(date, "%d-%b-%y"))
+
+
+library(tidyr)
+parsed_seperate_name <- extract(parsed, name, c("FirstName", "LastName"), "([^ ]+) (.*)")
+parsed_seperate_name <- parsed_seperate_name%>% 
+  mutate_at(c("FirstName", "LastName"), str_to_title)
+summary(parsed_seperate_name)
+```
+
+```{r,message=FALSE,warning=FALSE}
+library(stopwords)
+parsed$text <- tm::removeWords(parsed$text, words = stopwords("en"))
+
+library(textstem)
+parsed$text <- lemmatize_strings(parsed$text)
+```
+
+```{r,message=FALSE,warning=FALSE}
+statement <- paste(parsed$text,collapse = " ")
+
+tokens = data_frame(text = statement) %>% 
+  unnest_tokens(tbl = ., output = word, input = text)
+
+tokens%>% 
+  anti_join(stop_words) %>% 
+  count(word, sort = TRUE) %>% 
+  filter(n > 25) %>% 
+  na.omit() %>% 
+  wordcloud2(shape = "cardioid")
+```
+
+
+
+## Step 2
+
+Perform sentiment analyses on the texts. Given that these are earnings calls, you will likely want to use Loughran and McDonald's lexicon. This lexicon can be found in the `lexicon` package and in the `textdata` package. You should also explore the various `nrc` lexicons. Exploring the versions offered in `textdata` is a good start. Select any of the emotions from the various `nrc` lexicons (found within `textdata`) and perform sentiment analyses using that particular emotion. A good approach would be to use the words found within `textdata` and find them within `lexicon`.
+
+Below is an example of how you might get data from `textdata`. 
+
+```{r}
+library(textdata)
+get_sentiments("nrc")
+nrcWord <- textdata::lexicon_nrc()
+nrcValues <- lexicon::hash_sentiment_nrc
+nrcDominance <- textdata::lexicon_nrc_vad()
+```
+
+### Sentiment Analysis towards Overall Contents{.tabset .tabset-pills}
+
+#### Dominance
+
+```{r warning=FALSE}
+tokens %>% 
+  inner_join(nrcDominance, by=c('word'='Word')) %>% 
+  summarise(avg_Valence=mean(Valence),
+         avg_Arousal=mean(Arousal),
+         avg_Dominance=mean(Dominance))
+```
+
+#### Word
+
+```{r}
+tokens %>% 
+  inner_join(nrcWord, by='word') %>% 
+  group_by(sentiment) %>% 
+  count(sentiment) %>% 
+  arrange(n)
+
+nrc_disgust <- get_sentiments("nrc") %>% 
+  filter(sentiment == "disgust")
+tokens %>%
+  inner_join(nrc_disgust) %>%
+  count(word, sort = TRUE)
+```
+
+### Sentiment Difference Among different Individual/ Gender/ Role/ Call
+
+How you choose to aggregate sentiment is entirely up to you, but some reasonable ideas would be to aggregate them by indiviual, by role within the call, or the call as a whole. What can be learned about the sentiment from call to call?
+
+## Individual Difference
+
+##### Dominance
+
+```{r}
+TEMP <- parsed %>% 
+  select(name,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) 
+
+Dominance <- TEMP %>% 
+  inner_join(nrcDominance, by=c('word'='Word')) %>% 
+  group_by(name) %>%
+  summarise(avg_Valence=round(mean(Valence),2),
+         avg_Arousal=round(mean(Arousal),2),
+         avg_Dominance=round(mean(Dominance),2))
+Dominance
+```
+
+##### Values
+```{r}
+Values <- TEMP %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(name) %>%
+  summarise(avg_senti=round(mean(y),2))
+
+Values
+```
+
+##### Word
+
+```{r}
+Word <- TEMP %>% 
+  inner_join(nrcWord, by='word') %>% 
+  group_by(name,sentiment) %>%
+  count(sentiment) %>% 
+  spread(sentiment,n)
+
+Word
+```
+```{r}
+Word[is.na(Word)] <- 0
+Word %>% 
+  mutate(sum=sum(anger,anticipation,disgust,fear,joy,negative,positive,sadness,surprise,trust)) %>% 
+  arrange(desc(sum)) %>% 
+  head(10) %>% 
+  select(-sum) %>% 
+  gather(group,value,-name) %>% 
+  ggplot(aes(fill=group, y=value, x=name)) +
+  geom_bar(position="stack", stat="identity") +
+  ggtitle("Sentiment Frequencies of Individuals")+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+## Role Difference{.tabset .tabset-pills}
+
+##### Dominance
+
+```{r}
+TEMP <- parsed %>% 
+  select(title,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) 
+
+Dominance <- TEMP %>% 
+  inner_join(nrcDominance, by=c('word'='Word')) %>% 
+  group_by(title) %>%
+  summarise(avg_Valence=round(mean(Valence),2),
+         avg_Arousal=round(mean(Arousal),2),
+         avg_Dominance=round(mean(Dominance),2))
+
+Dominance
+```
+
+##### Values
+
+```{r}
+Values <- TEMP %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(title) %>%
+  summarise(avg_senti=round(mean(y),2))
+
+Values
+```
+```{r}
+Values <- parsed %>% 
+  select(title,gender,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text)  %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(title,gender) %>%
+  summarise(avg_senti=round(mean(y),2)) %>% 
+  spread(gender,avg_senti) 
+Values[is.na(Values)] <- 0
+Values %>% 
+  gather(gender,avg_senti,-title) %>% 
+  ggplot(aes(fill=gender, y=avg_senti, x=title)) + 
+  geom_bar(position="dodge", stat="identity")+
+  theme_minimal()+
+  ggtitle('Overall Sentiment Difference')
+```
+
+##### Word
+
+```{r}
+Word <- TEMP %>% 
+  inner_join(nrcWord, by='word') %>% 
+  group_by(title,sentiment) %>%
+  count(sentiment) %>% 
+  spread(sentiment,n)
+
+Word
+```
+```{r warning=FALSE}
+Word%>% 
+  mutate(sum=sum(anger,anticipation,disgust,fear,joy,negative,positive,sadness,surprise,trust)) %>% 
+  arrange(desc(sum)) %>% 
+  head(10) %>% 
+  select(-sum) %>% 
+  gather(group,value,-title) %>% 
+  ggplot(aes(fill=group, y=value, x=title)) +
+  geom_bar(position="stack", stat="identity") +
+  ggtitle("Sentiment Frequencies of Different Titles")+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+## Call Difference{.tabset .tabset-pills}
+##### Dominance
+
+```{r}
+TEMP <- parsed %>% 
+  mutate(date=as.factor(date)) %>% 
+  select(date,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) 
+
+Dominance <- TEMP %>% 
+  inner_join(nrcDominance, by=c('word'='Word')) %>% 
+  group_by(date) %>%
+  summarise(avg_Valence=round(mean(Valence),2),
+         avg_Arousal=round(mean(Arousal),2),
+         avg_Dominance=round(mean(Dominance),2))
+
+Dominance
+```
+```{r}
+colors <- c( "Valence"="light blue","Arousal" = "yellow", "Dominance" = "red")
+Dominance %>% 
+  mutate(date=as.Date(date)) %>% 
+  ggplot()+
+  geom_line(aes(x=date,y=avg_Valence,color="Valence"))+
+  geom_line(aes(x=date,y=avg_Arousal,color="Arousal"))+
+  geom_line(aes(x=date,y=avg_Dominance,color="Dominance"))+
+  theme_minimal()
+```
+
+##### Values
+
+```{r}
+Values <- TEMP %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(date) %>%
+  summarise(avg_senti=round(mean(y),2)) %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d"))
+
+Values
+```
+```{r message=FALSE, warning=FALSE}
+parsed %>% 
+  select(date,likelyRace,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text)  %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(date,likelyRace) %>%
+  summarise(avg_senti=round(mean(y),2)) %>% 
+  ggplot() + 
+  geom_smooth(aes(color=likelyRace, y=avg_senti, x=date),se=FALSE)+
+  theme_minimal()+
+  ggtitle('Overall Sentiment Among Different Races')
+```
+
+##### Word
+
+```{r}
+Word <- TEMP %>% 
+  inner_join(nrcWord, by='word') %>% 
+  group_by(date,sentiment) %>%
+  count(sentiment) %>% 
+  spread(sentiment,n)
+
+Word
+```
+
+# Silver
+
+## How Sentiment Affect Stock Price
+
+Register for a free API key from 
+<a href"https://www.alphavantage.co/documentation/">alphavantage</a>. Using your API key, get the daily time series for the given ticker and explore the 10 trading days around each call's date (i.e., the closing price for 5 days before the call, the closing price for the day of the call, and the closing price for the 5 days after the call). Do any visible patterns emerge when exploring the closing prices and the sentiment scores you created? Explain what this might mean for people wanting to make decisions based upon a call.
+
+```{r message=FALSE, warning=FALSE}
+WWE = read_csv("https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=WWE&outputsize=full&apikey=I5K6JKU82T65NFI9&datatype=csv")
+WWE <- WWE%>%
+  select(timestamp,close)
+```
+
+
+```{r}
+dates <- Values %>% 
+  mutate(date= as.Date(date)) %>% 
+  mutate(date_before = date-5) %>% 
+  mutate(date_after = date+5) %>% 
+  select(-avg_senti)%>% 
+  left_join(WWE,by=c('date_before'='timestamp')) %>% 
+  rename(close_before = close)%>% 
+  left_join(WWE,by=c('date_after'='timestamp')) %>% 
+  rename(close_after = close) %>% 
+  left_join(WWE,by=c('date'='timestamp')) %>% 
+  rename(close_exact = close)
+
+#fill the missing values
+dates <- dates %>% 
+  mutate(date_before_6 = date-6) %>% 
+  mutate(date_after_6 = date+6) %>%
+  mutate(date_after_7 = date+7) %>%
+  left_join(WWE,by=c('date_before_6'='timestamp')) %>% 
+  rename(close_before_6 = close)%>% 
+  left_join(WWE,by=c('date_after_6'='timestamp')) %>% 
+  rename(close_after_6 = close) %>% 
+  left_join(WWE,by=c('date_after_7'='timestamp')) %>% 
+  rename(close_after_7 = close) %>% 
+  mutate(close_b = coalesce(close_before,close_before_6))%>%
+  mutate(close_a = coalesce(close_after,close_after_6,close_after_7)) %>% 
+  select(date_before,close_b,date,close_exact,date_after,close_a)
+head(dates)
+```
+
+
+```{r}
+colors <- c( "Call Date" = "black","Sentiment"="light blue","Before Call" = "yellow", "After Call" = "red")
+WWE %>% 
+  filter((timestamp >= "2002-06-21")&(timestamp <= "2010-11-09")) %>% 
+  ggplot()+
+  geom_line(mapping = aes(x=timestamp, y=close), colour="dark grey",alpha=0.8)+
+  geom_col(data = Values,
+           mapping = aes(x=date,y=avg_senti*20,fill="Sentiment"),
+           alpha=0.5)+
+  geom_point(data=dates, mapping = aes(x=date, y=close_exact,
+             colour="Call Date"),alpha=0.5,size=1)+ 
+  geom_point(data=dates, mapping = aes(x=date_before, y=close_b,
+             colour="Before Call"),size=1)+
+  geom_point(data=dates, mapping = aes(x=date_after, y=close_a,
+             colour="After Call"),size=1)+
+  scale_color_manual(values = colors)+ 
+  theme(legend.position = "bottom")+
+  theme_minimal()+
+  ggtitle('How do the sentiment scores in the call affect closing price?')
+```
+
+Generally speaking, the trend of stock prices is similar to the pattern of sentiment changes especially between 2008 and 2010. Taking a look at each individual call, we can see that earning calls with extreme sentiments (high/low) will lead to the increase of the stock price (red dot appears higher than yellow dot) after the call. And for those calls with average sentiment level, the stock price tends to decrease after the call. 
+
+So, the investors could buy in stocks in extreme cases. They are supposed to buy in the stock when there is a promosing potential to increase due to a positive financial situation of the company. Also, they can buy in stocks when the company is not doing well so that they can buy in low and sell high in the longer future.
+
+# Platinum
+
+There are two calls within the zip file that you did not use for the previous steps -- they are not already parsed. If you are able to parse them, incorporate them into the rest of your data and determine if any new information comes to light.
+
+```{r}
+raw <- read.csv("wwe_raw_27_Oct_16.csv")
+temp <-  data_frame(raw[5:7,])
+names(temp)[1] <- 'name'
+index <- separate(temp,name,c('name','title'),sep = '–')
+index['organization'] <- 'World Wrestling Entertainment'
+temp <-  data_frame(raw[9:14,])
+names(temp)[1] <- 'name'
+index2 <- separate(temp,name,c('name','organization'),sep = '–')
+index2['title'] <- 'Analyst'
+index <- rbind(index,index2)
+index$name <- str_trim(index$name,side = "both")
+index$title <- str_trim(index$title,side = "both")
+index$organization <- str_trim(index$organization,side = "both")
+index[nrow(index)+1,] <- c('Operator','','')
+index <- index %>% mutate_at(c('name','organization','title'),as.character) 
+index$name[9] <- 'Robert Routh'
+index['date']=as.Date('2016-10-27')
+index['quarter']='Q3'
+head(index)
+```
+
+```{r message=FALSE, warning=FALSE}
+talk <-  data_frame(raw[-c(1:14),]) %>% 
+  mutate(text=as.character(raw[-c(1:14),])) %>% 
+  select(text)
+talk$text <- str_trim(talk$text,side = "both")
+
+i = 1
+self_parsed = data.frame(name=character(),text=character())
+
+while (i<=nrow(talk)) {
+  if(talk$text[i] %in% index$name){
+    self_parsed <- self_parsed %>% 
+      add_row(name = talk$text[i],text = talk$text[i+1])
+    i=i+2
+  }
+  else{
+    self_parsed <- self_parsed %>% 
+      add_row(name = self_parsed$name[nrow(self_parsed)],text = talk$text[i])
+    i=i+1
+    }
+}
+
+self_parsed <- self_parsed %>% 
+  inner_join(index,by='name') %>% 
+  filter(name != 'Operator') %>% 
+  select('name','title','organization','date','quarter','text')
+
+```
+
+```{r warning=FALSE}
+raw <- read.csv("wwe_raw_28_Jul_16.csv")
+index2 <- index %>% 
+  select(name,title,organization) %>% 
+  add_row(name='Laura Martin', title='Analyst',organization='Needham Investor Group')%>% 
+  mutate(date = as.Date('2016-07-28')) %>% 
+  mutate(quarter ='Q2') 
+index2$name[8] <- 'Dan Moore'
+index2$name[9] <- 'Rob Routh'
+
+talk <-  data_frame(raw[c(15:134),]) %>% 
+  mutate(text=as.character(raw[c(15:134),])) %>% 
+  select(text)
+talk$text <- str_trim(talk$text,side = "both")
+
+i = 1
+self_parsed_2 = data.frame(name=character(),text=character())
+
+while (i<=nrow(talk)) {
+  if(talk$text[i] %in% index2$name){
+    self_parsed_2 <- self_parsed_2 %>% 
+      add_row(name = talk$text[i],text = talk$text[i+1])
+    i=i+2
+  }
+  else{
+    self_parsed_2 <- self_parsed_2 %>% 
+      add_row(name = self_parsed_2$name[nrow(self_parsed_2)],text = talk$text[i])
+    i=i+1
+    }
+}
+
+self_parsed_2 <- self_parsed_2 %>% 
+  inner_join(index2,by='name') %>% 
+  filter(name != 'Operator') %>% 
+  select('name','title','organization','date','quarter','text')
+
+self_parsed <- rbind(self_parsed,self_parsed_2)
+head(self_parsed)
+```
+
+```{r}
+parsed_orign <- parsed %>% 
+  select('name','title','organization','date','quarter','text')
+total <- rbind(parsed_orign,self_parsed)
+
+total$text <- tm::removeWords(total$text, words = stopwords("en"))
+total$text <- lemmatize_strings(total$text)
+total$title <- gsub(".*SVP.*", "SVP", total$title)
+total$title <- gsub(".*C.*E.*O.*", "CEO", total$title)
+total$title <- gsub(".*C.*F.*O.*", "CFO", total$title)
+```
+
+```{r}
+Values <- total %>% 
+  select(date,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(date) %>%
+  summarise(avg_senti=round(mean(y),5))
+
+dates <- Values %>% 
+  mutate(date= as.Date(date)) %>% 
+  mutate(date_before = date-5) %>% 
+  mutate(date_after = date+5) %>% 
+  select(-avg_senti)%>% 
+  left_join(WWE,by=c('date_before'='timestamp')) %>% 
+  rename(close_before = close)%>% 
+  left_join(WWE,by=c('date_after'='timestamp')) %>% 
+  rename(close_after = close) %>% 
+  left_join(WWE,by=c('date'='timestamp')) %>% 
+  rename(close_exact = close)
+
+#fill the missing values
+dates <- dates %>% 
+  mutate(date_before_6 = date-6) %>% 
+  mutate(date_after_6 = date+6) %>%
+  mutate(date_after_7 = date+7) %>%
+  left_join(WWE,by=c('date_before_6'='timestamp')) %>% 
+  rename(close_before_6 = close)%>% 
+  left_join(WWE,by=c('date_after_6'='timestamp')) %>% 
+  rename(close_after_6 = close) %>% 
+  left_join(WWE,by=c('date_after_7'='timestamp')) %>% 
+  rename(close_after_7 = close) %>% 
+  mutate(close_b = coalesce(close_before,close_before_6))%>%
+  mutate(close_a = coalesce(close_after,close_after_6,close_after_7)) %>% 
+  select(date_before,close_b,date,close_exact,date_after,close_a)
+
+colors <- c( "Call Date" = "dark grey","Sentiment"="light blue","Before Call" = "yellow", "After Call" = "red")
+WWE %>% 
+  filter((timestamp >= "2002-06-21")&(timestamp <= "2016-11-09")) %>% 
+  ggplot()+
+  geom_line(mapping = aes(x=timestamp, y=close), colour="grey",alpha=0.8)+
+  geom_col(data = Values,
+           mapping = aes(x=date,y=avg_senti*20,fill="Sentiment"),
+           alpha=0.5)+
+  geom_point(data=dates, mapping = aes(x=date, y=close_exact,
+             colour="Call Date"),size=1)+ 
+  geom_point(data=dates, mapping = aes(x=date_before, y=close_b,
+             colour="Before Call"),size=1)+
+  geom_point(data=dates, mapping = aes(x=date_after, y=close_a,
+             colour="After Call"),size=1)+
+  scale_color_manual(values = colors)+ 
+  theme(legend.position = "bottom")+
+  theme_minimal()+
+  ggtitle('How do the sentiment scores in the call affect closing price?')
+```
+
+We can see that even though the sentiment levels of the two calls in 2016 are high, the stock price still decreased after the call, which shows that the earning call does not have much impacts on the stock price especially when the overall economy is not doing well.
