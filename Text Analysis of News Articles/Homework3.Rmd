@@ -1,0 +1,286 @@
+---
+title: "Text Analyses of News Articles"
+author: "[Zhijing Zhao]"
+
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+logo: "C:/Users/zhiji/Desktop/photo-1546422904-90eab23c3d7e.jpg"
+bg: "C:/Users/zhiji/Desktop/photo-1478940020726-e9e191651f1a.jpg"
+
+color: "#b7472a"
+output:
+  ndrmd::ndrmd1:
+    toc: TRUE
+    number_sections: FALSE
+    code_folding: "show"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+# Data Processing
+
+```{r}
+NewsArticles_origin <- read.csv("E:/ND/module3/unstructured/NewsArticles.csv")
+NewsArticles_origin$publish_date[NewsArticles_origin$article_id == 522] <- '2016/12/30'
+NewsArticles_origin <- NewsArticles_origin %>% 
+  select(article_id,publish_date,article_source_link,title,text) %>% 
+  filter(title != 'Quotable') %>% 
+  mutate_at(c('article_source_link','title','text'),as.character) %>% 
+  mutate(publish_date = as.Date(publish_date,'%Y/%m/%d')) 
+glimpse(NewsArticles_origin)
+```
+
+### Extract the publication and category of the article from source link
+
+```{r}
+NewsArticles <- NewsArticles_origin %>% 
+  # extract publication name from source link 
+  mutate(pub = gsub('(.+//w*\\.*)(.+)(\\.com.+)','\\2',article_source_link)) %>% 
+  mutate(pub = gsub('(.+//w*\\.*)(.+)(\\.co.+)','\\2',pub))%>%
+  mutate(pub = gsub('(.+//w*\\.*)(.+)(\\.ie.+)','\\2',pub)) %>% 
+  mutate(pub = str_remove_all(pub,'.go')) %>%
+  mutate(pub = str_remove_all(pub,'europe.'))%>% 
+  
+  #extract news category from source link
+  mutate(category = gsub('(.+\\.[a-z]+)(\\/[a-zA-Z]+\\/)(.+)','\\2',article_source_link)) %>%
+  mutate(category = gsub('(.+[0-9])(\\/[a-zA-Z]+\\/)(.+)','\\2',category)) %>% 
+  mutate(category = str_replace_all(category,"[^[:alnum:]]",'')) %>% 
+  mutate(category = ifelse(pub=='bbc',(gsub('(.+)(\\/news\\/)([a-z]+)(\\-.+)','\\3',article_source_link)),category)) %>%
+  
+  #clean up categories
+  mutate(category = gsub('^http.+', ' ',category)) %>% 
+  mutate(category = tolower(category)) %>% 
+  mutate(category = ifelse(category %in% c('en','epaper','news',' ','spottoon','quora',
+                                           'trules','weird','newsbeat'),'General', category)) %>% 
+  mutate(category = ifelse(category %in% c('americas','defense','election'),'us', category)) %>% 
+  mutate(category = ifelse(category %in% c('society'),'education', category))%>% 
+  mutate(category = ifelse(category %in% c('china','europe','middleeast','asia','africa',
+                                           'international','uk'),'world', category))%>% 
+  mutate(category = ifelse(category %in% c('technology','programmes','science'),'tech', category)) %>% 
+  mutate(category = ifelse(category %in% c('podcasts','pressreview','indepth','blogs',
+                                           'magazine'),'opinions', category))%>% 
+  mutate(category = ifelse(category %in% c('design','arts','lifestyle','travel','in'),
+                           'entertainment', category))%>% 
+  mutate(category = ifelse(category %in% c('sport','motorsport','golf','tennis',
+                                           'football'),'sports', category)) %>% 
+  mutate(category = ifelse(category %in% c('business'),'economy', category)) 
+glimpse(NewsArticles)
+```
+
+# Cloud Maps
+
+# Sentiment Analyses
+
+```{r,message=FALSE}
+library(stopwords)
+library(textstem)
+library(tidytext)
+
+NewsArticles_senti <- NewsArticles
+NewsArticles_senti$text <- str_replace_all(NewsArticles_senti$text, "[^[:alnum:]]", " ") %>% 
+  str_squish(.) %>% 
+  gsub("([a-z])([A-Z])", "\\1 \\2", .) %>% 
+  tm::removeWords(., words = stopwords("en")) %>% 
+  lemmatize_strings(.) %>% 
+  tm::removeNumbers(.) 
+
+NewsArticles_senti$title <- str_replace_all(NewsArticles_senti$title, "[^[:alnum:]]", " ") %>% 
+  str_squish(.) %>% 
+  gsub("([a-z])([A-Z])", "\\1 \\2", .) %>% 
+  tm::removeWords(., words = stopwords("en")) %>% 
+  lemmatize_strings(.) %>% 
+  tm::removeNumbers(.) 
+```
+
+```{r include=FALSE}
+library(textdata)
+get_sentiments("nrc")
+```
+
+```{r}
+nrcValues <- lexicon::hash_sentiment_nrc
+
+newstext <- NewsArticles_senti %>% 
+  select(article_id,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(article_id) %>%
+  summarise(text_ss=round(mean(y),2))
+
+newstitle <- NewsArticles_senti %>% 
+  select(article_id,title) %>% 
+  unnest_tokens(tbl = ., output = word, input = title) %>% 
+  inner_join(nrcValues, by=c('word'='x')) %>% 
+  group_by(article_id) %>%
+  summarise(title_ss=round(mean(y),2))
+
+NewsArticles_senti <- NewsArticles_senti %>% 
+  left_join(newstext,by='article_id') %>% 
+  left_join(newstitle,by='article_id') 
+```
+
+## Sentiment components of articles
+
+```{r}
+nrcWord <- textdata::lexicon_nrc()
+len <- NewsArticles_senti %>% 
+  select(article_id,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) %>% 
+  inner_join(nrcWord, by='word') %>%
+  group_by(article_id) %>% 
+  summarise(total=n())
+
+senti_group <- NewsArticles_senti %>% 
+  select(article_id,text) %>% 
+  unnest_tokens(tbl = ., output = word, input = text) %>% 
+  inner_join(nrcWord, by='word') %>%
+  group_by(article_id,sentiment) %>% 
+  count(sentiment) %>% 
+  inner_join(len,by='article_id') %>% 
+  mutate(percent = round(n/total,2)) %>% 
+  inner_join(NewsArticles_senti,by='article_id') 
+
+sanki <- senti_group %>%  
+  filter((category!='General')&(category!='weird')&(category!='spottoon'))%>% 
+  group_by(category,sentiment) %>% 
+  summarise(relative_freq_percent = sum(percent)) %>%
+  filter(relative_freq_percent >=5)
+  # spread(category,relative_freq_percent)
+```
+
+```{r,message=FALSE}
+library(viridis)
+library(patchwork)
+library(hrbrthemes)
+library(circlize)
+library(networkD3)
+
+colnames(sanki) <- c("source", "target", "value")
+
+nodes <- data.frame(name=c(as.character(sanki$source), as.character(sanki$target))%>% unique())
+
+sanki$IDsource=match(sanki$source, nodes$name)-1 
+sanki$IDtarget=match(sanki$target, nodes$name)-1
+
+ColourScal ='d3.scaleOrdinal() .range(["#FDE725FF","#B4DE2CFF","#6DCD59FF","#35B779FF",
+"#1F9E89FF","#26828EFF","#31688EFF","#3E4A89FF","#482878FF","#440154FF"])'
+
+sankeyNetwork(Links = sanki, Nodes = nodes,
+                     Source = "IDsource", Target = "IDtarget",
+                     Value = "value", NodeID = "name", 
+                     sinksRight=FALSE,  nodeWidth=40,colourScale=ColourScal, fontSize=13, nodePadding=20)
+```
+
+## Title VS Content
+
+```{r,lollipop_by_pub}
+library(sentimentr)
+load(url("https://raw.githubusercontent.com/saberry/courses/master/hash_sentiment_vadar.RData"))
+Title_NoLink <- NewsArticles %>% select(-article_source_link,-text)%>% 
+  mutate(publish_month = format(as.Date(publish_date), "%Y-%m")) 
+title <- sentiment(get_sentences(Title_NoLink), 
+          polarity_dt = hash_sentiment_vadar) %>% 
+  group_by(pub) %>% 
+  summarize(meanSentiment_title = mean(sentiment))
+Text_NoLink <- NewsArticles %>% select(-article_source_link,-title)%>% 
+  mutate(publish_month = format(as.Date(publish_date), "%Y-%m")) 
+pub_lolli <- sentiment(get_sentences(Text_NoLink), 
+          polarity_dt = hash_sentiment_vadar) %>% 
+  group_by(pub) %>% 
+  summarize(meanSentiment_text = mean(sentiment)) %>% 
+  inner_join(title,by='pub')
+
+library(ggplot2)
+library(hrbrthemes)
+
+colors <- c("Title" = "brown1", "Content" = "#009999")
+ggplot(pub_lolli) +
+  geom_segment( aes(x=pub, xend=pub, y=meanSentiment_title, yend=meanSentiment_text), color="grey") +
+  geom_point( aes(x=pub, y=meanSentiment_title, color='Title'), size=3 ) +
+  geom_point( aes(x=pub, y=meanSentiment_text, color='Content'), size=3 ) +
+  coord_flip()+
+  theme_minimal() + 
+  ggtitle('Sentiments by Publication')+
+  scale_color_manual(values = colors, name=' ')+
+  xlab("Publications") +
+  ylab("Average Sentiment Scores")+
+  geom_hline(yintercept = 0,color ='chocolate4',linetype='dashed')
+```
+
+```{r,lollipop_by_cat}
+title_cat <- sentiment(get_sentences(Title_NoLink), 
+          polarity_dt = hash_sentiment_vadar) %>% 
+  group_by(category) %>% 
+  summarize(meanSentiment_title = mean(sentiment))
+
+pub_lolli_cat <- sentiment(get_sentences(Text_NoLink), 
+          polarity_dt = hash_sentiment_vadar) %>% 
+  group_by(category) %>% 
+  summarize(meanSentiment_text = mean(sentiment)) %>% 
+  inner_join(title_cat,by='category')
+
+colors <- c("Title" = "brown1", "Content" = "#009999")
+ggplot(pub_lolli_cat) +
+  geom_segment( aes(x=category, xend=category, y=meanSentiment_title, yend=meanSentiment_text), color="grey") +
+  geom_point( aes(x=category, y=meanSentiment_title, color='Title'), size=3 ) +
+  geom_point( aes(x=category, y=meanSentiment_text, color='Content'), size=3 ) +
+  coord_flip()+
+  theme_minimal() + 
+  ggtitle('Sentiments by Category')+
+  scale_color_manual(values = colors, name=' ')+
+  xlab("Publications") +
+  ylab("Average Sentiment Scores")+
+  geom_hline(yintercept = 0,color ='chocolate4',linetype='dashed')
+```
+
+
+# Topic Modeling
+
+```{r,message=FALSE}
+library(stm)
+
+set.seed(1001)
+
+NewsPolitics <- NewsArticles_senti %>% 
+  filter(category=="world")
+holdoutRows = sample(1:nrow(NewsPolitics), 100, replace = FALSE)
+
+pro_Text = textProcessor(documents = NewsPolitics$text,#[-c(holdoutRows)], 
+                          metadata = NewsPolitics,#[-c(holdoutRows), ], 
+                          stem = FALSE)
+
+pro_Prep = prepDocuments(documents = pro_Text$documents, 
+                               vocab = pro_Text$vocab,
+                               meta = pro_Text$meta)
+```
+
+
+```{r r, message=FALSE}
+kTest = searchK(documents = pro_Prep$documents,
+             vocab = pro_Prep$vocab,
+             K = c(3,4, 5,10, 20), verbose = FALSE)
+
+plot(kTest)
+```
+
+To keep residual low and semantic coherence high, I chose k to be 5.
+
+```{r}
+topics5 = stm(documents = pro_Prep$documents, 
+             vocab = pro_Prep$vocab, seed = 1001,
+             K = 5, verbose = FALSE)
+```
+
+focus on the expected topic proportions plot:
+
+```{r}
+plot(topics5)
+```
+
+```{r}
+labelTopics(topics5)
+```
+
