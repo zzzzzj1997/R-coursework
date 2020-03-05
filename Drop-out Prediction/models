@@ -1,0 +1,1078 @@
+---
+title: "Model Comparison for Drop-out Prediction"
+subtitle: "Ethics in Data & Analytics"
+author: "Charlie Trense, Gabby Herrera-Lim, Zhijing Zhao, and Katherine Li"
+output:
+  html_document:
+    theme: cerulean
+    highlight: pygments
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(caret)
+library(DMwR)
+library(rpart)
+library(ROCR)
+library(randomForest)
+library(xgboost)
+library(caTools)
+library(rpart.plot)
+```
+
+
+<style>
+#TOC {
+  background: url("https://seeklogo.net/wp-content/uploads/2018/10/notre-dame-fighting-irish-logo.png");
+  background-size: 64px 64px;
+  background-position: top center;
+  padding-top: 60px !important;
+  background-repeat: no-repeat;
+}
+.list-group-item.active, .list-group-item.active:focus, .list-group-item.active:hover {
+  color: #D39F10;
+  background-color: #0C2340;
+  font-family: Avenir Next;
+  font-weight: 600;
+}
+.list-group-item {
+  color: #0C2340;
+  background-color: #D39F10;
+}
+.nav>li>a {
+  position: relative;
+  display: block;
+  color: #D39F10;
+  background-color: white;
+}
+  .nav>li>a:hover {
+    background-color: #D39F10;
+    color: #0C2340;
+  }
+.nav-pills > li.active > a, .nav-pills > li.active > a:focus {
+  color: #D39F10;
+  background-color: #0C2340;
+}
+  .nav-pills > li.active > a:hover {
+    background-color: #D39F10;
+    color: #0C2340;
+  }
+</style>
+
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 12px;
+      font-family: Avenir Next;
+      color: 0C2340;
+  }
+td {  /* Table  */
+  font-size: 8px;
+}
+h1.title {
+  font-size: 38px;
+  color: #0C2340;
+  font-family: Avenir Next;
+  font-style: bold;
+  font-weight: 800;
+  padding-top: 10px;
+  text-align: center;
+  text-decoration: underline;
+  margin-top: 20px;
+  margin-bottom: 5px;
+}
+h3.subtitle {
+  font-size: 25px;
+  color: #AE9142;
+  font-family: Avenir Next;
+  font-style: bold;
+  font-weight: 800;
+  text-align: center;
+  margin: 0px;
+}
+h4.author {
+  font-size: 20px;
+  color: #AE9142;
+  font-family: Avenir Next;
+  font-style: bold;
+  font-weight: 500;
+  text-align: center;
+  margin: 0px;
+}
+h2 { /* Header 3 */
+  font-size: 18px;
+  font-family: Avenir Next;
+  color: #0C2340;
+  font-weight: 700;
+}
+code.r{ /* Code block */
+    font-size: 12px;
+    font-family: Avenir Next;
+    color: #AE9142;
+}
+pre { /* Code block - determines code spacing between lines */
+    font-size: 10px;
+    font-family: Avenir Next;
+    color: #AE9142;
+}
+blockquote {
+    padding: 10px 20px;
+    margin: 0 0 20px;
+    font-size: 12px;
+    border-left: 5px solid #AE9142;
+}
+</style>
+
+***
+
+# Logistic Regression
+
+## Data Exploration
+
+First, I'll read in the data and get a sense for what it is like and do some data type conversion. 
+
+```{r}
+schooldata = read.csv('C:/Users/zhiji/Downloads/case3data.csv')
+
+# glimpse(schooldata)
+# summary(schooldata)
+
+schooldata$studentID = as.factor(schooldata$studentID)
+schooldata$grade = factor(schooldata$grade, ordered = TRUE, levels = c("9thGrade","10thGrade","11thGrade","12thGrade"))
+schooldata$year = as.factor(schooldata$year)
+schooldata$dropped = as.factor(schooldata$dropped)
+schooldata$zip = as.factor(schooldata$zip)
+schooldata$subsidizedLunches = factor(schooldata$subsidizedLunches, ordered = TRUE, levels = c("None","Partly","Fully"))
+schooldata$sanctions = factor(schooldata$sanctions, ordered = TRUE, levels = c("nothing","detention","suspended"))
+
+schooldata %>%
+  keep(is.numeric) %>%
+  gather() %>%
+  ggplot() +
+  geom_histogram(mapping = aes(x=value,fill=key), color="black") +
+  facet_wrap(~ key, scales = "free") +
+  theme_minimal()
+```
+
+AP Classes is skewed toward 0, but there aren't outliers worth accounting for. 
+
+Let's check for information value for each feature:
+
+```{r}
+round(prop.table(table(select(schooldata,zip))),4) * 100
+round(prop.table(table(select(schooldata,ethnicity))),4) * 100
+round(prop.table(table(select(schooldata,subsidizedLunches))),4) * 100
+round(prop.table(table(select(schooldata,sex))),4) * 100
+round(prop.table(table(select(schooldata,employmentHours))),4) * 100
+round(prop.table(table(select(schooldata,hrsWifiPerWeek))),4) * 100
+round(prop.table(table(select(schooldata,sanctions))),4) * 100
+round(prop.table(table(select(schooldata,librarySwipesPerWeek))),4) * 100
+round(prop.table(table(select(schooldata,apClasses))),4) * 100
+round(prop.table(table(select(schooldata,athleticSeasons))),4) * 100
+```
+
+After looking at the employment hours distribution, I'll convert it to an ordered factor with five classes (0, 5, 10, 15, 20).
+
+```{r}
+schooldata$employmentHours = factor(schooldata$employmentHours, ordered = TRUE, levels = c("0","5","10","15","20"))
+```
+
+Now, I'll check the correlations between the numeric features:
+
+```{r}
+library(corrplot)
+schooldata %>%
+  keep(is.numeric) %>%
+  cor() %>%
+  corrplot()
+
+libapcor = cor(schooldata$librarySwipesPerWeek, schooldata$apClasses)
+```
+
+Based on the correlation plot, there is the highest positive correlation between apClasses and librarySwipesPerWeek (`r libapcor`). There is the second highest correlation between librarySwipesPerWeek and hrsWifiPerWeek. Finally, there is a negative correlation between apClasses and athleticsSeasons. However, none of these variable have a high enough correlation with each other to remove any one feature from the model to keep another. 
+
+Let's do something similar with the categorical variables. 
+
+```{r}
+schooldata %>%
+  keep(is.factor) %>%
+  select(-studentID) %>%
+  gather() %>%
+  group_by(key,value) %>% 
+  summarise(n = n()) %>% 
+  ggplot() +
+  geom_bar(mapping=aes(x = value, y = n, fill=key), color="black", stat='identity') + 
+  coord_flip() +
+  facet_wrap(~ key, scales = "free") +
+  theme_minimal()
+```
+
+The "average" student is from the 15206 zipcode, doesn't have any sanctions, doesn't work, didn't drop out, and is African American. 
+
+## Data Partitioning and balancing
+
+Now, let's split the data. First, I'll remove studentID and year since we are trying to use this predictively not retrospectively. Then, I'll create a training and test data set and check the distributions of dropping out for these data sets. 
+
+```{r}
+schooldata = schooldata %>%
+  select(-studentID, -year)
+
+set.seed(1234)
+sample_set = sample(nrow(schooldata), round(nrow(schooldata)*.75), replace = FALSE)
+school_train = schooldata[sample_set, ]
+school_test = schooldata[-sample_set, ]
+
+round(prop.table(table(select(schooldata, dropped), exclude = NULL)), 4) * 100
+round(prop.table(table(select(school_train, dropped), exclude = NULL)), 4) * 100
+round(prop.table(table(select(school_test, dropped), exclude = NULL)), 4) * 100
+```
+
+There is abuot 6% drop rate in the training set and 5% in the test set. Let's use SMOTE to balance the training data since it is so unbalanced and check the class distributions. 
+
+```{r}
+library(DMwR)
+school_train = SMOTE(dropped ~ ., data.frame(school_train), perc.over = 100, perc.under = 200)
+
+round(prop.table(table(select(schooldata, dropped), exclude = NULL)), 4) * 100
+round(prop.table(table(select(school_train, dropped), exclude = NULL)), 4) * 100
+round(prop.table(table(select(school_test, dropped), exclude = NULL)), 4) * 100
+```
+
+Now, our training data is balanced. 
+
+## Logistic regression model on all features  
+
+Let's build a logistic regression model on all features.
+
+```{r}
+logit_mod1 =
+  glm(dropped ~ ., family = binomial(link = 'logit'), data = school_train)
+
+summary(logit_mod1)
+```
+
+It appears that grade is a statistically significant predictor. Freshmen and sophomores are most likely to drop out. Those who live in the 15232 zipcode are likely to drop out, as are those who are white. GPA is also statistically significant, as one would expect. The higher the GPA, the less likely someone is of dropping out. WiFi hours per week is actually a predictor of dropout rate - the more WiFi, the more likely someone is of dropping out. Library swipes, AP classes, and athletic seasons are all negatively correlated with dropping out. 
+
+We can also calculate the odds of dropping out based on a given feature from the coefficients in the model, but I won't spend too much time on it before checking accuracy and evaluating other models.
+
+```{r}
+gpaodds = exp(coef(logit_mod1)["gpa"])
+gpaodds2 = gpaodds * 100
+gpaprob = gpaodds/(1+gpaodds)
+gpaprob
+```
+
+For every increase in GPA by one point, a student is `r gpaodds2`% less likely to drop out.
+
+Let's evaluate the model's performance. First, we'll set an optimal cutoff for the information value, optimizing for both true positive and true negatives. 
+
+```{r}
+logit_pred = predict(logit_mod1, school_test, type = 'response')
+head(logit_pred)
+
+library(InformationValue)
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+head(logit_pred)
+
+logit_pred_table = table(school_test$dropped, logit_pred)
+logit_pred_table
+```
+
+Let's check our accuracy:
+
+```{r}
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+```
+
+It's `r accuracy`% accurate. Let's see if we can improve that by only using some significant features. We'll drop sex, subsidized lunches, employoment hours, ethnicity, and sanctions because they don't have statistically significant predictors in the previous model. 
+
+## Logistic regression model on significant features  
+
+### Drop statistically insignificant predictors
+
+```{r}
+logit_mod2 =
+  glm(
+    dropped ~ . -subsidizedLunches -sanctions -employmentHours,
+    family = binomial(link = 'logit'),
+    data = school_train
+  )
+
+summary(logit_mod2)
+
+logit_pred = predict(logit_mod2, school_test, type = 'response')
+
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+
+logit_pred_table = table(school_test$dropped, logit_pred)
+logit_pred_table
+
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+```
+
+Doing this slightly changed our accuracy to `r accuracy`%... Let's try stepwise AIC on all of the features.
+
+### Choose based on stepwise AIC
+
+```{r}
+logit_mod3 = glm(dropped ~ ., family = binomial(link = 'logit'), data = school_train) %>%
+  MASS::stepAIC(trace = FALSE)
+
+summary(logit_mod3)
+
+logit_pred = predict(logit_mod3, school_test, type = 'response')
+
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+
+logit_pred_table <- table(school_test$dropped, logit_pred)
+logit_pred_table
+
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+
+```
+
+That gets us to `r accuracy`% accuracy. 
+
+```{r}
+school_trainsex = school_train %>%
+  select(-sex)
+
+logit_mod4 = glm(dropped ~ ., family = binomial(link = 'logit'), data = school_trainsex) %>%
+  MASS::stepAIC(trace = FALSE)
+
+summary(logit_mod4)
+
+logit_pred = predict(logit_mod4, school_test, type = 'response')
+
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+
+logit_pred_table <- table(school_test$dropped, logit_pred)
+logit_pred_table
+
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+```
+
+This changes accuracy to `r accuracy` %, but it is worth it. Let's remove zipcode as well.
+
+```{r}
+school_trainzip = school_train %>%
+  select(-zip)
+
+logit_mod5 = glm(dropped ~ ., family = binomial(link = 'logit'), data = school_trainzip) %>%
+  MASS::stepAIC(trace = FALSE)
+
+summary(logit_mod5)
+
+logit_pred = predict(logit_mod4, school_test, type = 'response')
+
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+
+logit_pred_table <- table(school_test$dropped, logit_pred)
+logit_pred_table
+
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+```
+
+This changes accuracy to `r accuracy`%, but it is worth it to not categorize people by zip code. Let's remove both sex and zipcode.
+
+```{r}
+school_trainzipsex = school_train %>%
+  select(-zip, -sex)
+
+logit_mod6 = glm(dropped ~ ., family = binomial(link = 'logit'), data = school_trainzipsex) %>%
+  MASS::stepAIC(trace = FALSE)
+
+summary(logit_mod6)
+
+logit_pred = predict(logit_mod6, school_test, type = 'response')
+
+ideal_cutoff =
+  optimalCutoff(
+    actuals = school_test$dropped,
+    predictedScores = logit_pred,
+    optimiseFor = "Both"
+  )
+
+ideal_cutoff
+
+logit_pred = ifelse(logit_pred > ideal_cutoff, 1, 0)
+
+logit_pred_table <- table(school_test$dropped, logit_pred)
+logit_pred_table
+
+accuracy = sum(diag(logit_pred_table)) / nrow(school_test) * 100
+```
+
+This changes accuracy to `r accuracy`%, but most importantly, it reduces our type II error. 
+### Explore specific zipcode area
+
+Just for data exploration purposes, since zipcode 15232 is so significant, let's see its correlation with a particular race... 
+
+```{r}
+schooldata15232 = schooldata %>%
+  filter(zip == "15232") %>%
+  select(zip, ethnicity, subsidizedLunches, sanctions, dropped)
+
+summary(schooldata15232$ethnicity)
+summary(schooldata15232$subsidizedLunches)
+summary(schooldata15232$sanctions)
+summary(schooldata15232$dropped)
+```
+
+There aren't more students that drop out percentage-wise than other districts, so it's interesting that the model gave this district an increased chance of dropping out. 
+
+# Decision Tree 
+
+## Data preparation, partitioning and balancing
+
+```{r}
+schooldata <- read.csv('C:/Users/zhiji/Downloads/case3data.csv')
+
+schooldata <- schooldata %>% 
+  mutate_at(c('studentID','dropped','zip'),factor) %>% 
+  #mutate(year = as.Date(as.character(year), format = "%Y")) %>% 
+  mutate(grade = factor(grade)) %>% 
+  mutate(subsidizedLunches = factor(subsidizedLunches)) %>% 
+  mutate(sanctions = factor(sanctions)) %>%
+  #mutate(grade = factor(grade, ordered = TRUE, levels = c("9thGrade","10thGrade","11thGrade","12thGrade"))) %>% 
+  #mutate(subsidizedLunches = factor(subsidizedLunches, ordered = TRUE, levels = c("None","Partly","Fully"))) %>% 
+  #mutate(sanctions = factor(sanctions, ordered = TRUE, levels = c("nothing","detention","suspended"))) %>%
+  select(-studentID) #%>% 
+#select(-year)
+
+# stratified random sampling
+set.seed(1234)
+sample_set <- schooldata %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+
+# Now we can create our training and test data from the sample set vector.
+school_train <- subset(schooldata, sample_set == TRUE)
+school_test <- subset(schooldata, sample_set == FALSE)
+
+# Check the proportions for the class between all three sets.
+schooldata %>% pull(dropped) %>% table() %>% prop.table() %>% round(digits = 2)
+school_train %>% pull(dropped) %>% table() %>% prop.table() %>% round(digits = 2)
+school_test %>% pull(dropped) %>% table() %>% prop.table() %>% round(digits = 2)
+
+# Balance training data 
+school_train <- SMOTE(dropped ~ ., data.frame(school_train), perc.over = 200, perc.under = 150)
+school_train %>% pull(dropped) %>% table() %>% prop.table() %>% round(digits = 2)
+```
+
+## Train and test the model
+
+```{r}
+#----------------------------------------------------------------
+#' #1. Decision Tree
+#----------------------------------------------------------------
+
+# Tuning
+
+# (1) The control object
+ctrl <- trainControl(method = "cv", number = 10, #10-fold cross-validation
+                     selectionFunction = "oneSE") # 3 options - {best, oneSE, tolerance}
+
+# (2) tuning grid
+grid <- expand.grid(.cp = seq(from=0.0001, to=0.005, by=0.0001))
+grid
+
+# Training
+
+set.seed(1234)
+tree.mod <-
+  train(
+    dropped ~ .,
+    data = school_train,
+    method = "rpart",
+    metric = "Kappa", # (3) model performance evaluation statistic (Kappa)
+    trControl = ctrl,
+    tuneGrid = grid
+  )
+
+tree.mod
+```
+
+# Random Forest 
+
+```{r}
+#modelLookup("rf")
+
+# Create a search grid based on maximum value for .mtry (the number of randomly select predictors)
+grid <- expand.grid(.mtry = c(3, 6, 9))
+
+#grid
+
+# Create our control object. 
+# This time, k=3 for k-fold cross validation and we want the 'best' performing configuration.
+ctrl <- trainControl(method = "cv", number = 3, selectionFunction = "best")
+
+set.seed(1234)
+rf.mod <-
+  train(
+    dropped ~ .,
+    data = school_train,
+    method = "rf",
+    metric = "Kappa",
+    trControl = ctrl,
+    tuneGrid = grid
+  )
+
+rf.mod
+```
+
+# Extreme Gradient Boosting
+
+```{r}
+#----------------------------------------------------------------
+#' #3. Extreme Gradient Boosting
+#----------------------------------------------------------------
+
+ctrl <- trainControl(method = "cv", number = 3, selectionFunction = "best")
+
+modelLookup("xgbTree")
+
+# There are a lot of parameters to tune here.
+# For now, let's simply use the defaults, with some slight variations.
+
+grid <- expand.grid(
+  nrounds = 20,
+  max_depth = c(4, 6, 8),
+  eta =  c(0.1, 0.3, 0.5),
+  gamma = 0.01,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = c(0.5, 1)
+)
+
+#grid
+
+
+# CAUTION: This sometimes takes a while to run!
+set.seed(1234)
+xgb.mod <-
+  train(
+    dropped ~ .,
+    data = school_train,
+    method = "xgbTree",
+    metric = "Kappa",
+    trControl = ctrl,
+    tuneGrid = grid
+  )
+
+xgb.mod
+```
+
+
+```{r}
+#----------------------------------------------------------------
+#' #4. Logistic Regression
+#----------------------------------------------------------------
+
+# Train the model.
+logit.mod <-
+  glm(dropped ~ ., family = binomial(link = 'logit'), data = school_train)
+
+# Use the model to predict outcomes against our test data.
+logit.pred.prob <- predict(logit.mod, school_test, type = 'response')
+
+# Using a decision boundary of 0.5 (i.e If P(y=1|X) > 0.5 then y="Yes" else y="No").
+logit.pred <- as.factor(ifelse(logit.pred.prob > 0.5, "1", "0"))
+
+test <- school_test$dropped
+pred <- logit.pred
+prob <- logit.pred.prob
+```
+
+# Compare Model Performance
+
+```{r}
+# Plot ROC Curve.
+roc.pred <- prediction(predictions = prob, labels = test)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+plot(roc.perf, main = "ROC Curve for Dropped Student Prediction Approaches", col = 2, lwd = 2)
+abline(a = 0, b = 1, lwd = 3, lty = 2, col = 1)
+
+# Get performance metrics.
+accuracy <- mean(test == pred)
+precision <- posPredValue(as.factor(pred), as.factor(test), positive = "1")
+recall <- caret::sensitivity(as.factor(pred), as.factor(test), positive = "1")
+fmeasure <- (2 * precision * recall)/(precision + recall)
+confmat <- caret::confusionMatrix(pred, test, positive = "1")
+kappa <- as.numeric(confmat$overall["Kappa"])
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+comparisons <- tibble(approach="Logistic Regression", accuracy = accuracy, fmeasure = fmeasure, kappa = kappa, auc = auc)
+
+#' ##Classification Tree.
+tree.pred <- predict(tree.mod, school_test, type = "raw")
+tree.pred.prob <- predict(tree.mod, school_test, type = "prob")
+
+test <- school_test$dropped
+pred <- tree.pred
+prob <- tree.pred.prob[,c("1")]
+
+# Plot ROC Curve.
+# dev.off()
+roc.pred <- prediction(predictions = prob, labels = test)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+plot(roc.perf, col=3, lwd = 2, add=TRUE)
+
+
+# Get performance metrics.
+accuracy <- mean(test == pred)
+precision <- posPredValue(as.factor(pred), as.factor(test), positive = "1")
+recall <- caret::sensitivity(as.factor(pred), as.factor(test), positive = "1")
+fmeasure <- (2 * precision * recall)/(precision + recall)
+confmat <- caret::confusionMatrix(pred, test, positive = "1")
+kappa <- as.numeric(confmat$overall["Kappa"])
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+comparisons <- comparisons %>%
+  add_row(approach="Classification Tree", accuracy = accuracy, fmeasure = fmeasure, kappa = kappa, auc = auc) 
+
+
+
+#' ##Random Forest.
+rf.pred <- predict(rf.mod, school_test, type = "raw")
+rf.pred.prob <- predict(rf.mod, school_test, type = "prob")
+
+test <- school_test$dropped
+pred <- rf.pred
+prob <- rf.pred.prob[,c("1")]
+
+# Plot ROC Curve.
+roc.pred <- prediction(predictions = prob, labels = test)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+plot(roc.perf, col=4, lwd = 2, add=TRUE)
+
+# Get performance metrics.
+accuracy <- mean(test == pred)
+precision <- posPredValue(as.factor(pred), as.factor(test), positive = "1")
+recall <- caret::sensitivity(as.factor(pred), as.factor(test), positive = "1")
+fmeasure <- (2 * precision * recall)/(precision + recall)
+confmat <- caret::confusionMatrix(pred, test, positive = "1")
+kappa <- as.numeric(confmat$overall["Kappa"])
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+comparisons <- comparisons %>%
+  add_row(approach="Random Forest", accuracy = accuracy, fmeasure = fmeasure, kappa = kappa, auc = auc) 
+
+
+#' ##XGBoost.
+xgb.pred <- predict(xgb.mod, school_test, type = "raw")
+xgb.pred.prob <- predict(xgb.mod, school_test, type = "prob")
+
+test <- school_test$dropped
+pred <- xgb.pred
+prob <- xgb.pred.prob[,c("1")]
+
+# Plot ROC Curve.
+roc.pred <- prediction(predictions = prob, labels = test)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+plot(roc.perf, col=5, lwd = 2, add=TRUE)
+
+# Get performance metrics.
+accuracy <- mean(test == pred)
+precision <- posPredValue(as.factor(pred), as.factor(test), positive = "1")
+recall <- caret::sensitivity(as.factor(pred), as.factor(test), positive = "1")
+fmeasure <- (2 * precision * recall)/(precision + recall)
+confmat <- caret::confusionMatrix(pred, test, positive = "1")
+kappa <- as.numeric(confmat$overall["Kappa"])
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+comparisons <- comparisons %>%
+  add_row(approach="Extreme Gradient Boosting", accuracy = accuracy, fmeasure = fmeasure, kappa = kappa, auc = auc) 
+
+# Draw ROC legend.
+legend(0.6, 0.5, c('Logistic Regression', 'Classification Tree', 'Random Forest', 'Extreme Gradient Boosting'), c(2:5,7),cex=0.6)
+
+
+#' ##Output Comparison Table.
+comparisons
+```
+
+# Decision Tree by Ethnicity&Zipcode
+
+## Data Pre-processing
+
+```{r}
+schooldata <- read.csv('C:/Users/zhiji/Downloads/case3data.csv')
+
+schooldata = schooldata %>%
+  select(-studentID) %>%
+  mutate_at(c('dropped','zip','grade','ethnicity','sex','subsidizedLunches','sanctions','year'),factor) 
+
+af = schooldata %>%
+  filter(ethnicity == "African American")
+wh = schooldata %>%
+  filter(ethnicity == "White")
+as = schooldata %>%
+  filter(ethnicity == "Asian")
+hi = schooldata %>%
+  filter(ethnicity == "Hispanic")
+other = schooldata %>%
+  filter(ethnicity == "Other")
+
+zip15201 = schooldata %>%
+  filter(zip == "15201")
+zip15206 = schooldata %>%
+  filter(zip == "15206")
+zip15208 = schooldata %>%
+  filter(zip == "15208")
+zip15224 = schooldata %>%
+  filter(zip == "15224")
+zip15232 = schooldata %>%
+  filter(zip == "15232")
+
+# stratified random sampling
+set.seed(1234)
+sample_set <- schooldata %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sampleaf = af %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+samplewh = wh %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sampleas = as %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+samplehi = hi %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sampleot = other %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+
+sample15201 = zip15201 %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sample15206 = zip15206 %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sample15208 = zip15208 %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sample15224 = zip15224 %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+sample15232 = zip15232 %>% pull(dropped) %>% sample.split(SplitRatio = .75)
+
+# Now we can create our training and test data from the sample set vector.
+school_train <- subset(schooldata, sample_set == TRUE)
+school_test <- subset(schooldata, sample_set == FALSE)
+af_train = subset(af, sampleaf == TRUE)
+af_test = subset(af, sampleaf == FALSE)
+wh_train = subset(wh, samplewh == TRUE)
+wh_test = subset(wh, samplewh == FALSE)
+as_train = subset(as, sampleas == TRUE)
+as_test = subset(as, sampleas == FALSE)
+hi_train = subset(hi, samplehi == TRUE)
+hi_test = subset(hi, samplehi == FALSE)
+ot_train = subset(other, sampleot == TRUE)
+ot_test = subset(other, sampleot == FALSE)
+train201 = subset(zip15201, sample15201 == TRUE)
+test201 = subset(zip15201, sample15201 == FALSE)
+train206 = subset(zip15206, sample15206 == TRUE)
+test206 = subset(zip15206, sample15206 == FALSE)
+train208 = subset(zip15208, sample15208 == TRUE)
+test208 = subset(zip15208, sample15208 == FALSE)
+train224 = subset(zip15224, sample15224 == TRUE)
+test224 = subset(zip15224, sample15224 == FALSE)
+train232 = subset(zip15232, sample15232 == TRUE)
+test232 = subset(zip15232, sample15232 == FALSE)
+
+# Balance training data 
+school_train <- SMOTE(dropped ~ ., data.frame(school_train), perc.over = 200, perc.under = 150)
+af_train = SMOTE(dropped ~ ., data.frame(af_train), perc.over = 200, perc.under = 150)
+wh_train = SMOTE(dropped ~ ., data.frame(wh_train), perc.over = 200, perc.under = 150)
+as_train = SMOTE(dropped ~ ., data.frame(as_train), perc.over = 200, perc.under = 150)
+hi_train = SMOTE(dropped ~ ., data.frame(hi_train), perc.over = 200, perc.under = 150)
+ot_train = SMOTE(dropped ~ ., data.frame(ot_train), perc.over = 200, perc.under = 150)
+
+train201 = SMOTE(dropped ~ ., data.frame(train201), perc.over = 200, perc.under = 150)
+train206 = SMOTE(dropped ~ ., data.frame(train206), perc.over = 200, perc.under = 150)
+train208 = SMOTE(dropped ~ ., data.frame(train208), perc.over = 200, perc.under = 150)
+train224 = SMOTE(dropped ~ ., data.frame(train224), perc.over = 200, perc.under = 150)
+train232 = SMOTE(dropped ~ ., data.frame(train232), perc.over = 200, perc.under = 150)
+
+# #----------------------------------------------------------------
+# #' #1. Decision Tree
+# #----------------------------------------------------------------
+# 
+# # Tuning
+# 
+# # (1) The control object
+# ctrl <- trainControl(method = "cv", number = 10, #10-fold cross-validation
+#                      selectionFunction = "oneSE") # 3 options - {best, oneSE, tolerance}
+# 
+# # (2) tuning grid
+# grid <- expand.grid(.cp = seq(from=0.0001, to=0.005, by=0.0001))
+# grid
+# 
+# # Training
+# 
+# set.seed(1234)
+# tree.mod <-
+#   train(
+#     dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+#     data = school_train,
+#     method = "rpart",
+#     metric = "Kappa", # (3) model performance evaluation statistic (Kappa)
+#     trControl = ctrl,
+#     tuneGrid = grid
+#   )
+```
+
+## Train and test the sub-data
+
+```{r}
+tree.mod = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = school_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016,
+                            maxdepth = 3)
+  )
+tree.mod
+rpart.plot(tree.mod)
+
+### RACE
+tree_af = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = af_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree_wh = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = wh_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree_as = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = as_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree_hi = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = hi_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree_ot = 
+  rpart(
+    dropped ~ grade + zip + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = ot_train,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+
+### ZIP
+tree201 = 
+  rpart(
+    dropped ~ grade + zip + ethnicity + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = train201,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree206 = 
+  rpart(
+    dropped ~ grade + zip + ethnicity + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = train206,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree208 = 
+  rpart(
+    dropped ~ grade + zip + ethnicity + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = train208,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree224 = 
+  rpart(
+    dropped ~ grade + zip + ethnicity + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = train224,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+tree232 = 
+  rpart(
+    dropped ~ grade + zip + ethnicity + sex + gpa + subsidizedLunches + employmentHours + sanctions + hrsWifiPerWeek + apClasses + athleticSeasons + librarySwipesPerWeek,
+    data = train232,
+    method = "class",
+    control = rpart.control(cp = 0.0016)
+  )
+```
+
+## Visualize the trees 
+
+```{r}
+rpart.plot(tree_af)
+rpart.plot(tree_wh)
+rpart.plot(tree_hi)
+rpart.plot(tree_ot)
+rpart.plot(tree_as)
+```
+
+## Metrics
+
+```{r}
+tree.pred <- predict(tree.mod, school_test, type = "class")
+tree.pred.prob <- predict(tree.mod, school_test, type = "prob")
+
+pred_table = table(school_test$dropped, tree.pred)
+pred_table
+tree_pred_acc = sum(diag(pred_table))/nrow(school_test)
+tree_pred_acc
+
+### RACE
+tree.pred <- predict(tree_af, af_test, type = "class")
+tree.pred.prob <- predict(tree_af, af_test, type = "prob")
+
+pred_table_af = table(af_test$dropped, tree.pred)
+pred_table_af
+tree_pred_acc_af = sum(diag(pred_table_af))/nrow(af_test)
+tree_pred_acc_af
+
+tree.pred <- predict(tree_wh, wh_test, type = "class")
+tree.pred.prob <- predict(tree_wh, wh_test, type = "prob")
+
+pred_table_wh = table(wh_test$dropped, tree.pred)
+pred_table_wh
+tree_pred_acc_wh = sum(diag(pred_table_wh))/nrow(wh_test)
+tree_pred_acc_wh
+
+tree.pred <- predict(tree_as, as_test, type = "class")
+tree.pred.prob <- predict(tree_as, as_test, type = "prob")
+
+pred_table_as = table(as_test$dropped, tree.pred)
+pred_table_as
+tree_pred_acc_as = sum(diag(pred_table_as))/nrow(as_test)
+tree_pred_acc_as
+
+tree.pred <- predict(tree_hi, hi_test, type = "class")
+tree.pred.prob <- predict(tree_hi, hi_test, type = "prob")
+
+pred_table_hi = table(hi_test$dropped, tree.pred)
+pred_table_hi
+tree_pred_acc_hi = sum(diag(pred_table_hi))/nrow(hi_test)
+tree_pred_acc_hi
+
+tree.pred <- predict(tree_ot, ot_test, type = "class")
+tree.pred.prob <- predict(tree_ot, ot_test, type = "prob")
+
+pred_table_ot = table(ot_test$dropped, tree.pred)
+pred_table_ot
+tree_pred_acc_ot = sum(diag(pred_table_ot))/nrow(ot_test)
+tree_pred_acc_ot
+
+pred_table_af
+pred_table_as
+pred_table_hi
+pred_table_ot
+pred_table_wh
+
+
+tree_pred_acc_af
+tree_pred_acc_as
+tree_pred_acc_hi
+tree_pred_acc_ot
+tree_pred_acc_wh
+mean(c(tree_pred_acc_af,
+       tree_pred_acc_as,
+       tree_pred_acc_hi,
+       tree_pred_acc_ot,
+       tree_pred_acc_wh))
+
+### ZIP
+
+tree.pred <- predict(tree201, test201, type = "class")
+tree.pred.prob <- predict(tree201, test201, type = "prob")
+
+pred_table_201 = table(test201$dropped, tree.pred)
+pred_table_201
+tree_pred_acc_201 = sum(diag(pred_table_201))/nrow(test201)
+tree_pred_acc_201
+
+tree.pred <- predict(tree206, test206, type = "class")
+tree.pred.prob <- predict(tree206, test206, type = "prob")
+
+pred_table_206 = table(test206$dropped, tree.pred)
+pred_table_206
+tree_pred_acc_206 = sum(diag(pred_table_206))/nrow(test206)
+tree_pred_acc_206
+
+tree.pred <- predict(tree208, test208, type = "class")
+tree.pred.prob <- predict(tree208, test208, type = "prob")
+
+pred_table_208 = table(test208$dropped, tree.pred)
+pred_table_208
+tree_pred_acc_208 = sum(diag(pred_table_208))/nrow(test208)
+tree_pred_acc_208
+
+tree.pred <- predict(tree224, test224, type = "class")
+tree.pred.prob <- predict(tree224, test224, type = "prob")
+
+pred_table_224 = table(test224$dropped, tree.pred)
+pred_table_224
+tree_pred_acc_224 = sum(diag(pred_table_224))/nrow(test224)
+tree_pred_acc_224
+
+tree.pred <- predict(tree232, test232, type = "class")
+tree.pred.prob <- predict(tree232, test232, type = "prob")
+
+pred_table_232 = table(test232$dropped, tree.pred)
+pred_table_232
+tree_pred_acc_232 = sum(diag(pred_table_232))/nrow(test232)
+tree_pred_acc_232
+
+pred_table_201
+pred_table_206
+pred_table_208
+pred_table_224
+pred_table_232
+
+
+tree_pred_acc_201
+tree_pred_acc_206
+tree_pred_acc_208
+tree_pred_acc_224
+tree_pred_acc_232
+```
+
